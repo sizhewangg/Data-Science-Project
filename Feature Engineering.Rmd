@@ -1,0 +1,67 @@
+## Feature Engineering
+
+### Load Packages
+We load only the essential packages (`dplyr`, `readr`) needed to manipulate the cleaned dataset and export new CSVs. This keeps our environment focused on data selection and I/O operations.
+
+```{r}
+library(dplyr)
+library(readr)
+```
+
+### Load Preprocessed Data
+Re-import the cleaned dataset (`dataset_preprocessed.csv`) to start feature construction from a known, validated state. We use `glimpse()` and `summary()` to verify that all required variables from preprocessing and EDA are present and correctly formatted.
+
+```{r}
+df_final <- read_csv("./dataset/dataset_preprocessed.csv")
+
+glimpse(df_final)
+summary(df_final)
+```
+
+### Prepare Baseline Model Data
+Based on our EDA and random forest importance ranking, we select the top predictors for traditional R models:
+- **Social features**: `friends_count_log` (rank ~3.3), `favourites_log` (rank ~4.0), `normalize_influence` (rank ~4.6), `statuses_count_log` (rank ~5.1), `followers_count_log` (rank ~6.3), `cred` (rank ~7.1)  
+- **Text features**: `tweet_char_count` (rank ~4.8), `tweet_word_count` (rank ~9.1), `flesch`, `sentiment` (rank ~7.9), `sd_sentiment` (rank ~9.4)  
+
+We bundle these into `df_baseline` alongside the target `truth_label`, then write out `baseline.csv` for our R-based modeling.
+
+```{r}
+df_baseline <- df_final %>%
+  select( 
+    friends_count_log,
+    favourites_log,
+    normalize_influence,
+    tweet_char_count,
+    statuses_count_log,
+    flesch,
+    followers_count_log,
+    cred,
+    sentiment,
+    sd_sentiment,
+    tweet_word_count,
+
+    truth_label
+  )
+
+write_csv(df_baseline, "./dataset/baseline.csv")
+```
+
+### Prepare Deep Learning Model Data
+For the deep learning pipeline, we create a lean data frame containing:
+- **Text input**: `tweet_clean` for BERT tokenization  
+- **Key numeric features**: `followers_count_log`, `cred`, `exclamation_winsor`, `questions_winsor`, `sentiment`, `sd_sentiment`, `retweets_log`  
+- **Target**: `truth_label`  
+
+This specialized dataset is saved as `df_deep.csv` to feed directly into Python-based model training. 
+
+```{r}
+df_deep <- df_final %>%
+  select(
+    tweet_clean,
+    followers_count_log, cred, exclamation_winsor, questions_winsor, sentiment, sd_sentiment,
+    retweets_log,
+    truth_label
+  )
+
+write_csv(df_deep, "./dataset/df_deep.csv")
+```

@@ -1,0 +1,207 @@
+## R Baseline Modeling
+
+### Load Libraries
+We load a suite of packages for data handling (`dplyr`, `readr`), model training and tuning (`caret`, `glmnet`, `ranger`, `xgboost`), performance evaluation (`pROC`), and plotting (`ggplot2`). This collection equips us to fit both regularized linear models and gradient-boosted trees, and to assess them rigorously.
+
+```{r}
+library(dplyr)
+library(readr)
+library(caret)
+library(glmnet)
+library(ranger)
+library(pROC)
+library(ggplot2)
+library(xgboost)
+```
+
+### Load Dataset & Convert Labels
+The pre-engineered baseline dataset is read from CSV. We then convert the binary `truth_label` into a two-level factor (`"False"`, `"True"`), ensuring compatibility with classification routines in `caret` that expect factor outcomes.
+
+```{r}
+df_baseline <- read_csv("./dataset/baseline.csv") %>%
+  mutate(
+    truth_label_factor = factor(
+      truth_label,
+      levels = c(FALSE, TRUE),
+      labels = c("False","True")
+    )
+  )
+```
+
+### Split Data into Training and Test Sets
+To evaluate generalization, we stratify-sample 70% of the data for training and hold out 30% for final testing, using `createDataPartition()`. The `set.seed()` call guarantees reproducibility of this split.
+
+```{r}
+set.seed(42)
+train_idx <- createDataPartition(df_baseline$truth_label_factor,
+                                 p = 0.7, list = FALSE)
+train_raw <- df_baseline[train_idx, ]
+test_raw  <- df_baseline[-train_idx, ]
+```
+
+### Feature Standardization (Centering & Scaling)
+Regularized linear models (like elastic net) and gradient boosting can benefit from standardized inputs. We identify all numeric predictors, fit a `preProcess()` transformer on the training set to center and scale them, and then apply the same transformation to both training and test sets. This prevents data leakage and ensures consistency.
+
+```{r}
+num_feats <- setdiff(names(train_raw), c("truth_label","truth_label_factor"))
+preproc   <- preProcess(train_raw[num_feats], method = c("center","scale"))
+
+train_scaled <- train_raw
+train_scaled[num_feats] <- predict(preproc, train_raw[num_feats])
+
+test_scaled <- test_raw
+test_scaled[num_feats]  <- predict(preproc, test_raw[num_feats])
+```
+
+### Cross-Validation Setup
+We define a repeated 5-fold cross-validation scheme (`repeatedcv` with 2 repeats) that returns class probabilities and uses the ROC AUC as the optimization metric (`twoClassSummary`). Saving predictions enables later analysis of tuning results.
+
+```{r}
+set.seed(2025)
+cv_ctrl <- trainControl(
+  method          = "repeatedcv",
+  number          = 5,
+  repeats         = 2,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE
+)
+```
+
+
+### Elastic Net Model Training
+We construct a tuning grid over mixing parameter `alpha` (0 = ridge to 1 = lasso) and penalty `lambda` (spanning 10⁻⁴ to 10⁰). Using `train()`, we fit an elastic net logistic regression on the scaled training data, optimizing for highest ROC. We then extract and print the best hyperparameters and corresponding ROC.
+
+```{r}
+glmnet_grid <- expand.grid(
+  alpha  = seq(0, 1, by = 0.2),
+  lambda = 10^seq(-4, 0, length = 20)
+)
+set.seed(42)
+glmnet_fit <- train(
+  truth_label_factor ~ . - truth_label,
+  data      = train_scaled,
+  method    = "glmnet",
+  metric    = "ROC",
+  trControl = cv_ctrl,
+  tuneGrid  = glmnet_grid
+)
+
+print(glmnet_fit$bestTune)
+print(max(glmnet_fit$results$ROC))
+
+```
+
+### Elastic Net Performance on Test Set
+Predicted probabilities for the positive class (“True”) are obtained on the held-out test set. Using `pROC`, we compute the ROC curve, AUC, and select the optimal threshold by Youden’s J statistic. We convert probabilities to class labels, generate a confusion matrix, and report accuracy, sensitivity, specificity, and F1. Finally, we plot the ROC curve to visualize discrimination performance.
+
+```{r}
+prob_glmnet <- predict(glmnet_fit, test_scaled, type = "prob")[, "True"]
+roc_glmnet  <- roc(test_scaled$truth_label_factor, prob_glmnet,
+                   levels = c("False","True"))
+auc_glmnet  <- auc(roc_glmnet)
+thr_glmnet <- coords(
+  roc_glmnet, "best",
+  ret       = "threshold",
+  transpose = FALSE
+)$threshold
+pred_glmnet <- factor(
+  ifelse(prob_glmnet > thr_glmnet, "True", "False"),
+  levels = c("False","True")
+)
+cm_glmnet <- confusionMatrix(pred_glmnet, test_scaled$truth_label_factor)
+
+cat("\n=== Elastic Net Performance ===\n")
+print(cm_glmnet)
+cat("Test AUC:", round(auc_glmnet,3), "\n")
+plot(roc_glmnet, main = "Elastic Net ROC Curve")
+```
+
+### XGBoost Model Training
+We define a grid of XGBoost hyperparameters (`nrounds`, `max_depth`, `eta`, `gamma`, `colsample_bytree`, `min_child_weight`, `subsample`) to explore tree complexity and regularization. The `train()` function again uses our repeated CV and ROC metric to find the best combination, which we print along with its resampled ROC AUC.
+
+```{r}
+xgb_grid <- expand.grid(
+  nrounds          = c(100, 300),
+  max_depth        = c(4, 6),
+  eta              = c(0.1, 0.3),
+  gamma            = c(0, 1),
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample        = 0.8
+)
+
+set.seed(42)
+xgb_fit <- train(
+  truth_label_factor ~ . - truth_label,
+  data      = train_scaled,
+  method    = "xgbTree",
+  metric    = "ROC",
+  trControl = cv_ctrl,
+  tuneGrid  = xgb_grid,
+  verbose   = FALSE
+)
+
+print(xgb_fit$bestTune)
+cat("Best resampled ROC AUC:", 
+    round(max(xgb_fit$results$ROC), 4), "\n")
+
+```
+
+### XGBoost Performance on Test Set
+On the test set, we predict class probabilities and compute the ROC curve and AUC as before. We derive the optimal probability threshold, binarize predictions, and compute the confusion matrix. From this we report test-set accuracy and F1-score, and plot the XGBoost ROC for direct comparison with elastic net.
+
+```{r}
+prob_xgb <- predict(xgb_fit, test_scaled, type = "prob")[, "True"]
+roc_xgb  <- roc(test_scaled$truth_label_factor, prob_xgb,
+                levels = c("False","True"))
+auc_xgb  <- auc(roc_xgb)
+cat("Test ROC AUC:", round(auc_xgb, 4), "\n")
+plot(roc_xgb, main = "XGBoost ROC Curve")
+
+best_coord <- coords(
+  roc_xgb, 
+  x       = "best",
+  best.method = "youden",
+  ret     = "threshold",
+  transpose = FALSE
+)
+thr_xgb <- best_coord$threshold
+pred_xgb <- factor(
+  ifelse(prob_xgb > thr_xgb, "True", "False"),
+  levels = c("False","True")
+)
+
+cm_xgb <- confusionMatrix(pred_xgb, test_scaled$truth_label_factor)
+cat("\n=== XGBoost Performance ===\n")
+print(cm_xgb)
+
+acc_xgb <- cm_xgb$overall["Accuracy"]
+f1_xgb  <- cm_xgb$byClass["F1"]
+cat("Accuracy:", round(acc_xgb,3),
+    "  F1:", round(f1_xgb,3), "\n")
+```
+
+### Model Comparison
+We consolidate key metrics—Accuracy, F1, and AUC—into a summary table comparing the elastic net and XGBoost models. This side-by-side view highlights which baseline algorithm offers superior performance before advancing to deep learning approaches.
+
+```{r}
+results_compare <- data.frame(
+  Model    = c("ElasticNet", "XGBoost"),
+  Accuracy = c(
+    cm_glmnet$overall["Accuracy"],
+    acc_xgb
+  ),
+  F1       = c(
+    cm_glmnet$byClass["F1"],
+    f1_xgb
+  ),
+  AUC      = c(
+    auc_glmnet,
+    auc_xgb
+  )
+)
+
+print(results_compare)
+
+```

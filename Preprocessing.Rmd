@@ -1,0 +1,213 @@
+## Data Preprocessing
+
+### Load Libraries
+We begin by loading the core packages for data manipulation (`dplyr`, `tidyr`, `purrr`), string manipulation (`stringr`), fast CSV I/O (`readr`), sentiment analysis (`sentimentr`), text statistics (`quanteda`, `quanteda.textstats`), and winsorization for outlier handling (`DescTools`). These libraries will support all subsequent cleaning and feature extraction steps.
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(readr)
+library(sentimentr)
+library(quanteda)
+library(quanteda.textstats)
+library(DescTools)
+library(purrr)
+```
+
+### Load Dataset
+Next, we read two CSV files:
+- **Features_For_Traditional_ML_Techniques.csv**: Contains handcrafted linguistic and user metrics.
+- **Truth_Seeker_Model_Dataset.csv**: Provides ground truth labels via majority votes.
+
+We then inspect each data frame’s structure (`str()`) and summary statistics (`summary()`) to confirm successful import and identify any obvious data quality issues, such as unexpected missing values or incorrect types.
+```{r}
+df_features <- read_csv("./dataset/Features_For_Traditional_ML_Techniques.csv", col_types = cols())
+df_truth    <- read_csv("./dataset/Truth_Seeker_Model_Dataset.csv", col_types = cols())
+
+str(df_features)
+str(df_truth)
+summary(df_features)
+summary(df_truth)
+```
+
+### Merge Dataset
+We perform an inner join on the `tweet` column to combine feature data with truth labels. A new binary column `truth_label` is created using logical rules based on the majority vote (`majority_target`) and its agreement (`3_label_majority_answer`). Any rows that cannot be labeled are dropped. We use `glimpse()` to verify the merged data frame’s dimensions and variable types.
+
+```{r}
+df_merged <- inner_join(df_features, df_truth, by = "tweet", suffix = c("", "_truth")) %>%
+  mutate(truth_label = case_when(
+      majority_target == TRUE  & `3_label_majority_answer` == "Agree"    ~ TRUE,
+      majority_target == TRUE  & `3_label_majority_answer` == "Disagree" ~ FALSE,
+      majority_target == FALSE & `3_label_majority_answer` == "Disagree" ~ TRUE,
+      majority_target == FALSE & `3_label_majority_answer` == "Agree"    ~ FALSE,
+      TRUE ~ NA
+    )) %>%
+  filter(!is.na(truth_label))
+
+glimpse(df_merged)
+```
+
+### Field Removal and Selection
+To focus on relevant predictors, we remove:
+- Bot-related fields (`BotScoreBinary`).
+- Identifiers (`author`, `manual_keywords`).
+- Extra labeling columns (`5_label_majority_answer`, `BinaryNumTarget_truth`, `3_label_majority_answer`).
+- All `_truth` suffixed variables that are no longer needed.
+
+Then we explicitly select only the variables we plan to use: the original text (`tweet`), label (`truth_label`), linguistic style counts (e.g., `exclamation`, `questions`, `capitals`), and user metrics (`followers_count`, `cred`, `normalize_influence`, etc.).
+
+```{r}
+df_merged <- df_merged %>%
+  select(-BotScoreBinary, -author, -manual_keywords, -`5_label_majority_answer`, -target, -BinaryNumTarget_truth, -`3_label_majority_answer`) %>%
+  select(-ends_with("_truth"))
+```
+
+```{r}
+df_selected <- df_merged %>%
+  select(
+    statement,
+    tweet,
+    truth_label,
+    unique_count,
+    present_verbs,
+    total_count,
+    past_verbs,
+    adjectives,
+    pronouns,
+    exclamation,
+    questions,
+    capitals,
+    ampersand,
+    hashtags,
+    followers_count,
+    friends_count,
+    favourites_count,
+    statuses_count,
+    listed_count,
+    retweets,
+    favourites,
+    cred,
+    normalize_influence
+  )
+```
+
+```{r}
+df_selected <- df_selected %>%
+  drop_na(tweet, truth_label) %>%
+  drop_na()
+```
+
+### Text Feature Extraction
+We enrich the data with basic text-derived features:
+1. **`tweet_clean`**: Lowercase text, strip URLs, user mentions, hashtags (removing `#`), non-word characters, and extra whitespace.
+2. **`tweet_sentences`**: Sentence tokenization for later sentiment analysis.
+3. **`tweet_word_count`**, **`tweet_char_count`**, and **`tweet_avg_word_len`**: Capture message complexity via word and character counts and average word length.
+
+```{r}
+df_selected <- df_selected %>%
+  mutate(
+    tweet_clean = tweet %>%
+      str_to_lower() %>%
+      str_replace_all("http\\S+", "") %>%
+      str_replace_all("@\\w+", "") %>%
+      str_replace_all("#", "") %>%
+      str_replace_all("[^\\w\\s\\.!?]", " ") %>%
+      str_replace_all("\\s+", " ") %>%
+      str_trim(),
+    
+    tweet_sentences = map(tweet_clean, sentimentr::get_sentences),
+    
+    tweet_word_count   = str_count(tweet_clean, "\\S+"),
+    tweet_char_count   = nchar(tweet_clean),
+    tweet_avg_word_len = ifelse(tweet_word_count > 0, tweet_char_count / tweet_word_count, 0)
+  )
+```
+
+### Sentiment Analysis
+Using `sentimentr::sentiment_by()`, we compute each tweet’s average sentiment (`sentiment`) and its standard deviation (`sd_sentiment`). These features capture the emotional tone and variability of the text.
+
+```{r}
+sentiment_scores <- sentiment_by(df_selected$tweet_clean)
+df_selected <- df_selected %>%
+  mutate(
+    sentiment   = sentiment_scores$ave_sentiment,
+    sd_sentiment = sentiment_scores$sd
+  )
+```
+
+### Readability
+We convert `tweet_clean` into a `quanteda` corpus and calculate the Flesch reading-ease score (`flesch`) using `textstat_readability()`. This metric helps quantify textual complexity.
+
+```{r}
+corpus_tweets <- corpus(df_selected$tweet_clean)
+readability_stats <- textstat_readability(corpus_tweets, measure = "Flesch")
+df_selected <- df_selected %>%
+  mutate(flesch = readability_stats$Flesch)
+```
+
+### Outlier Handling
+To mitigate extreme values, we winsorize all numeric features at the 1st and 99th percentiles. We then apply a log1p transform to highly skewed counts (followers, friends, statuses, retweets, favourites) to stabilize their distributions.
+
+```{r}
+numeric_cols <- c("unique_count", "present_verbs", "total_count", "past_verbs", "adjectives",
+                  "pronouns", "exclamation", "questions", "capitals", "ampersand", "hashtags",
+                  "followers_count", "friends_count", "favourites_count", "statuses_count",
+                  "listed_count", "retweets", "favourites", "cred", "normalize_influence")
+
+for (col in numeric_cols) {
+  q_vals <- quantile(df_selected[[col]], probs = c(0.01, 0.99), na.rm = TRUE)
+  df_selected[[paste0(col, "_winsor")]] <- DescTools::Winsorize(df_selected[[col]], val = q_vals)
+}
+
+
+df_selected <- df_selected %>%
+  mutate(
+    followers_count_log = log1p(followers_count),
+    friends_count_log   = log1p(friends_count),
+    statuses_count_log  = log1p(statuses_count),
+    retweets_log        = log1p(retweets),
+    favourites_log      = log1p(favourites_count)
+  )
+```
+
+### Normalisation
+We define a `normalize()` function to standardize features to zero mean and unit variance. We apply this scaling to the winsorized variables, the log-transformed counts, and the user credibility metrics (`cred`, `normalize_influence`).
+
+```{r}
+normalize <- function(x) { (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE) }
+
+df_selected <- df_selected %>%
+  mutate_at(vars(ends_with("_winsor"),
+                 followers_count_log, friends_count_log, statuses_count_log,
+                 retweets_log, favourites_log, cred, normalize_influence),
+            normalize)
+```
+
+### Save Final Preprocessed Dataset
+We select the final set of processed features, ensure no missing sentiment values remain, and use `glimpse()` and `summary()` to do a final sanity check on `df_final`. Finally, we export the cleaned and enriched data to `dataset_preprocessed.csv` for downstream modeling.
+
+```{r}
+df_final <- df_selected %>%
+  select(
+    statement, tweet, tweet_clean, truth_label,
+    tweet_word_count, tweet_char_count, tweet_avg_word_len,
+    sentiment, sd_sentiment, flesch,
+    unique_count_winsor, present_verbs_winsor, total_count_winsor, past_verbs_winsor,
+    adjectives_winsor, pronouns_winsor, exclamation_winsor, questions_winsor,
+    capitals_winsor, ampersand_winsor, hashtags_winsor,
+    followers_count_log, friends_count_log, statuses_count_log,
+    retweets_log, favourites_log,
+    cred, normalize_influence
+  )
+
+df_final <- df_final %>% 
+  filter(!is.na(sd_sentiment))
+
+glimpse(df_final)
+summary(df_final)
+```
+
+# Save as csv
+```{r}
+write_csv(df_final, "./dataset/dataset_preprocessed.csv")
+```

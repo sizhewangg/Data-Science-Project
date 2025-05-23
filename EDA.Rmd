@@ -1,0 +1,344 @@
+## Exploratory Data Analysis
+
+### Load Libraries
+We load packages for data manipulation (`dplyr`, `tidyr`), visualization (`ggplot2`, `gridExtra`, `ggpubr`), correlation analysis (`corrplot`), and preliminary modeling (`randomForest`). These tools will support all our EDA visualizations and statistical tests.
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(readr)
+library(corrplot)
+library(gridExtra)
+library(ggpubr)
+library(randomForest)
+```
+
+### Load Dataset
+Import the preprocessed dataset (`dataset_preprocessed.csv`) and inspect its structure and summary statistics with `glimpse()` and `summary()`. This ensures the preprocessing steps completed successfully and gives an overview of feature distributions.
+
+```{r}
+df_final <- read_csv("./dataset/dataset_preprocessed.csv")
+
+glimpse(df_final)
+summary(df_final)
+```
+
+### Label Distribution Analysis
+Convert the binary `truth_label` into a factor with levels “False” and “True”. Count the number of tweets in each class and visualize the class balance using a bar chart. This helps identify any class imbalance that may influence modeling decisions.
+
+```{r}
+df_final <- df_final %>%
+  mutate(truth_label_factor = factor(truth_label, levels = c(FALSE, TRUE), labels = c("False", "True")))
+
+label_count <- df_final %>%
+  group_by(truth_label_factor) %>%
+  summarise(count = n())
+
+print(label_count)
+
+ggplot(label_count, aes(x = truth_label_factor, y = count, fill = truth_label_factor)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Distribution of True vs. False Tweets", x = "Label", y = "Count")
+```
+
+### Text Length Exploratory Analysis
+- **Character Count Histogram**: Plot the distribution of `tweet_char_count` to understand overall tweet length in characters.  
+- **Word Count Histogram**: Plot the distribution of `tweet_word_count` to inspect token-level length.  
+Arrange these two histograms side by side to compare length patterns at different granularity levels.
+
+```{r}
+p1 <- ggplot(df_final, aes(x = tweet_char_count)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  theme_minimal() +
+  labs(title = "Distribution of Tweet Character Count", x = "Character Count", y = "Frequency")
+
+p2 <- ggplot(df_final, aes(x = tweet_word_count)) +
+  geom_histogram(bins = 30, fill = "coral", color = "white") +
+  theme_minimal() +
+  labs(title = "Distribution of Tweet Word Count", x = "Word Count", y = "Frequency")
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+### Comparison of Tweet Length by Label
+Use a horizontal boxplot of `tweet_word_count` grouped by `truth_label` to compare word counts between true and false tweets. This reveals whether one class tends to have systematically longer or shorter tweets.
+
+```{r}
+ggplot(df_final, aes(x = truth_label_factor, y = tweet_word_count, fill = truth_label_factor)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Word Count by True/False Label", x = "Label", y = "Word Count")
+```
+
+### Sentiment and Readability Analysis
+- **Readability Distribution**: Display a histogram of the Flesch score (`flesch`) to assess text complexity across all tweets.  
+- **Sentiment Density by Label**: Overlay density plots of average sentiment by label to examine differences in emotional tone between true and false tweets.
+
+```{r}
+ggplot(df_final, aes(x = flesch)) +
+  geom_histogram(fill = "darkorchid", bins = 30, color = "white") +
+  theme_minimal() +
+  labs(title = "Distribution of Flesch Readability Scores", x = "Flesch Score", y = "Count")
+
+ggplot(df_final, aes(x = sentiment, fill = truth_label_factor)) +
+  geom_density(alpha = 0.6) +
+  theme_minimal() +
+  labs(title = "Sentiment Density by Label", x = "Sentiment Score", y = "Density")
+
+```
+
+### Summary Statistics of Length, Sentiment, and Readability
+Calculate overall and per-label summary statistics (mean, median, standard deviation) for `tweet_char_count`, `tweet_word_count`, `sentiment`, and `flesch`. Round results for clarity. These tables quantify observed differences and provide context for subsequent tests.
+
+```{r}
+tweet_length_overall <- df_final %>%
+  summarise(
+    mean_char = mean(tweet_char_count, na.rm = TRUE),
+    median_char = median(tweet_char_count, na.rm = TRUE),
+    sd_char = sd(tweet_char_count, na.rm = TRUE),
+    mean_word = mean(tweet_word_count, na.rm = TRUE),
+    median_word = median(tweet_word_count, na.rm = TRUE),
+    sd_word = sd(tweet_word_count, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+cat("Overall Tweet Length Statistics:\n")
+print(tweet_length_overall)
+
+tweet_length_by_label <- df_final %>%
+  group_by(truth_label_factor) %>%
+  summarise(
+    mean_char = mean(tweet_char_count, na.rm = TRUE),
+    median_char = median(tweet_char_count, na.rm = TRUE),
+    sd_char = sd(tweet_char_count, na.rm = TRUE),
+    mean_word = mean(tweet_word_count, na.rm = TRUE),
+    median_word = median(tweet_word_count, na.rm = TRUE),
+    sd_word = sd(tweet_word_count, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+cat("Tweet Length Statistics by Label:\n")
+print(tweet_length_by_label)
+
+sentiment_stats_by_label <- df_final %>%
+  group_by(truth_label_factor) %>%
+  summarise(
+    mean_sentiment = mean(sentiment, na.rm = TRUE),
+    median_sentiment = median(sentiment, na.rm = TRUE),
+    sd_sentiment = sd(sentiment, na.rm = TRUE),
+    mean_flesch = mean(flesch, na.rm = TRUE),
+    median_flesch = median(flesch, na.rm = TRUE),
+    sd_flesch = sd(flesch, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+cat("Sentiment and Readability Statistics by Label:\n")
+print(sentiment_stats_by_label)
+
+```
+
+### T-Tests for Sentiment and Word Count
+Perform independent t-tests comparing `sentiment` and `tweet_word_count` between true and false tweets. These tests determine whether observed differences in tone or length are statistically significant.
+
+```{r}
+t.test(sentiment ~ truth_label_factor, data = df_final)
+t.test(tweet_word_count ~ truth_label_factor, data = df_final)
+```
+
+### Punctuation Usage Comparison
+1. Compute group-wise mean, median, and SD for `exclamation_winsor` and `questions_winsor`.  
+2. Visualize each with a horizontal boxplot by label to compare distributions.  
+3. Conduct t-tests to assess whether the differences in punctuation usage are significant.  
+4. Arrange the exclamation and question plots vertically for clear comparison.  
+This analysis identifies whether punctuation patterns differ systematically across classes.
+
+```{r}
+excl_stats <- df_final %>%
+  group_by(truth_label_factor) %>%
+  summarise(
+    mean_exclamation = mean(exclamation_winsor, na.rm = TRUE),
+    median_exclamation = median(exclamation_winsor, na.rm = TRUE),
+    sd_exclamation = sd(exclamation_winsor, na.rm = TRUE)
+  )
+print(excl_stats)
+
+p_exclamation <- ggplot(df_final, aes(x = truth_label_factor, y = exclamation_winsor, fill = truth_label_factor)) +
+  geom_boxplot(alpha = 0.7) +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Exclamation Usage (Winsorized & Normalized) by Label", 
+       x = "Label", y = "Exclamations (winsor)") +
+  scale_fill_manual(values = c("0" = "orange", "1" = "forestgreen"))
+
+t_exclamation <- t.test(exclamation_winsor ~ truth_label_factor, data = df_final)
+print(t_exclamation)
+
+
+quest_stats <- df_final %>%
+  group_by(truth_label_factor) %>%
+  summarise(
+    mean_questions = mean(questions_winsor, na.rm = TRUE),
+    median_questions = median(questions_winsor, na.rm = TRUE),
+    sd_questions = sd(questions_winsor, na.rm = TRUE)
+  )
+print(quest_stats)
+
+p_questions <- ggplot(df_final, aes(x = truth_label_factor, y = questions_winsor, fill = truth_label_factor)) +
+  geom_boxplot(alpha = 0.7) +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Question Usage (Winsorized & Normalized) by Label", 
+       x = "Label", y = "Questions (winsor)") +
+  scale_fill_manual(values = c("0" = "orange", "1" = "forestgreen"))
+
+t_questions <- t.test(questions_winsor ~ truth_label_factor, data = df_final)
+print(t_questions)
+
+gridExtra::grid.arrange(p_exclamation, p_questions, ncol = 1)
+```
+
+
+### User Socialisation Features EDA
+Summarize user metrics (`followers_count_log`, `friends_count_log`, `cred`, `normalize_influence`) by label, reporting means and medians. Plot density curves for each metric to visualize distributional differences between true and false tweet authors. Use Wilcoxon rank-sum tests to verify significance under non-normality.
+
+```{r}
+user_feature_summary <- df_final %>%
+  group_by(truth_label_factor) %>%
+  summarise(
+    mean_followers  = mean(followers_count_log),
+    median_followers = median(followers_count_log),
+    mean_friends    = mean(friends_count_log),
+    median_friends  = median(friends_count_log),
+    mean_cred       = mean(cred),
+    median_cred     = median(cred),
+    mean_influence  = mean(normalize_influence),
+    median_influence= median(normalize_influence),
+    n = n()
+  )
+
+user_feature_summary
+
+```
+
+```{r}
+ggplot(df_final, aes(x = followers_count_log, fill = truth_label_factor)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Followers Count (Log) by True/False Label", x = "Log1p(Followers Count)", y = "Density")
+
+```
+
+```{r}
+ggplot(df_final, aes(x = cred, fill = truth_label_factor)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Credibility by True/False Label", x = "Cred", y = "Density")
+
+```
+
+```{r}
+ggplot(df_final, aes(x = normalize_influence, fill = truth_label_factor)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Influence by True/False Label", x = "Normalize Influence", y = "Density")
+
+```
+
+```{r}
+wilcox.test(followers_count_log ~ truth_label_factor, data = df_final)
+wilcox.test(cred ~ truth_label_factor, data = df_final)
+wilcox.test(normalize_influence ~ truth_label_factor, data = df_final)
+```
+
+### Feature Correlation Analysis
+Select key numeric features and compute their Pearson correlation matrix. Display it as a clustered heatmap using `corrplot`. This reveals multicollinearity and guides feature selection for downstream modeling.
+
+```{r}
+num_cols_for_corr <- c(
+  "tweet_word_count", "tweet_char_count", "tweet_avg_word_len",
+  "sentiment", "sd_sentiment", "flesch",
+  "unique_count_winsor", "exclamation_winsor", "questions_winsor", "capitals_winsor",
+  "followers_count_log", "friends_count_log", "statuses_count_log", 
+  "retweets_log", "favourites_log", "cred", "normalize_influence"
+)
+
+df_num <- df_final[, num_cols_for_corr]
+corr_matrix <- cor(df_num, use = "complete.obs", method = "pearson")
+corrplot(corr_matrix, method = "color", type = "upper",
+         tl.cex = 0.7, tl.col = "black", order = "hclust",
+         title = "Correlation Matrix of Numeric Features",
+         addCoef.col = "black", number.cex = 0.5)
+```
+
+### Random Forest Importance Estimation
+To get preliminary feature importance:
+1. Sample 10% of the data for faster training.  
+2. Train a random forest with 100 trees on text-derived and user features.  
+3. Extract `MeanDecreaseAccuracy` and `MeanDecreaseGini` metrics.  
+4. Rank features by each metric, compute an average rank, and sort.  
+5. Visualize importance rankings and the two individual metrics with horizontal bar charts.  
+This step surfaces the most predictive variables and informs our baseline and deep models.
+
+```{r}
+df_eda_rf <- df_final %>%
+  mutate(truth_label_factor = factor(truth_label_factor, levels = c("False", "True")))
+
+set.seed(42)
+df_eda_sample <- df_eda_rf %>%
+  sample_frac(0.1)
+
+rf_model <- randomForest(
+  truth_label_factor ~ tweet_word_count + tweet_char_count + tweet_avg_word_len +
+    sentiment + sd_sentiment + flesch +
+    unique_count_winsor + exclamation_winsor + questions_winsor + capitals_winsor +
+    followers_count_log + friends_count_log + statuses_count_log + retweets_log + favourites_log +
+    cred + normalize_influence,
+  data = df_eda_sample,
+  ntree = 100,
+  importance = TRUE
+)
+
+imp_mat <- importance(rf_model)
+print(imp_mat)
+
+imp_df <- as.data.frame(imp_mat)
+imp_df$Feature <- rownames(imp_df)
+
+imp_df <- imp_df %>%
+  mutate(
+    rank_accuracy = rank(-MeanDecreaseAccuracy),
+    rank_gini = rank(-MeanDecreaseGini),
+    avg_rank = (rank_accuracy + rank_gini) / 2
+  ) %>%
+  arrange(avg_rank)
+
+print("Importance:")
+print(imp_df[, c("Feature", "MeanDecreaseAccuracy", "MeanDecreaseGini", "rank_accuracy", "rank_gini", "avg_rank")])
+
+p_importance <- ggplot(imp_df, aes(x = reorder(Feature, -avg_rank), y = avg_rank)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Importance Ranking", x = "Feature", y = "Average Rank (Lower is More Important)") +
+  theme_minimal()
+
+p_accuracy <- ggplot(imp_df, aes(x = reorder(Feature, -MeanDecreaseAccuracy), y = MeanDecreaseAccuracy)) +
+  geom_bar(stat = "identity", fill = "darkred", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Mean Decrease Accuracy", x = "Feature", y = "MeanDecreaseAccuracy") +
+  theme_minimal()
+
+p_gini <- ggplot(imp_df, aes(x = reorder(Feature, -MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "darkgreen", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Mean Decrease Gini", x = "Feature", y = "MeanDecreaseGini") +
+  theme_minimal()
+
+gridExtra::grid.arrange(p_accuracy, p_gini, ncol = 1)
+```
+
+### Final Importance Ranking Visualization
+Present a consolidated bar chart of average feature ranks, highlighting which features the random forest found most informative. This guides our feature selection strategy going forward.
+
+```{r}
+gridExtra::grid.arrange(p_importance, ncol = 1)
+```
